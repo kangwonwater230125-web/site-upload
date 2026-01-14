@@ -5,16 +5,21 @@ const path = require('path');
 const cors = require('cors');
 const { google } = require('googleapis');
 
-
 const app = express();
 app.use(cors());
-app.use(express.static(__dirname));
 app.use(express.json());
+
+// ✅ 정적 파일 (로고 등) → public 폴더
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ✅ 업로드 파일 접근
 app.use('/files', express.static(path.join(__dirname, 'uploads')));
-// 🔹 index.html을 루트(/)에서 보여주기
+
+// ✅ 루트(/)에서 index.html 보여주기
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
+
 
 
 const storage = multer.diskStorage({
