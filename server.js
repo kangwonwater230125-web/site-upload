@@ -57,7 +57,76 @@ function extractFields(body) {
   return { date, workType, address, uploader, memo };
 }
 
-// ✅ “부모 폴더 안에서” 폴더 찾기/생성 (driveId/corpora 안 씀)
+// ✅ 한글 파일명 깨짐 복구 (latin1로 들어온 UTF-8을 되살림)
+function fixMulterFilename(name) {
+  if (!name) return "";
+  try {
+    const fixed = Buffer.from(name, "latin1").toString("utf8");
+    if (fixed.includes(" ")) return name;
+    return fixed;
+  } catch {
+    return name;
+  }
+}
+
+function sanitizeFilename(name) {
+  return (name || "")
+    .replace(/\u0000/g, "")
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// ✅ 확장자 결정: 원본명 > mimetype
+function getExt(file) {
+  const orig = file?.originalname || "";
+  const m = orig.match(/\.([a-zA-Z0-9]+)$/);
+  if (m && m[1]) return m[1].toLowerCase();
+
+  const mt = (file?.mimetype || "").toLowerCase();
+  if (mt.includes("jpeg")) return "jpg";
+  if (mt.includes("png")) return "png";
+  if (mt.includes("gif")) return "gif";
+  if (mt.includes("webp")) return "webp";
+  if (mt.includes("heic")) return "heic";
+  return "bin";
+}
+
+// ✅ 모바일에서 흔한 “의미없는 파일명” 판별
+function isGenericOriginalName(name) {
+  if (!name) return true;
+  const base = name.replace(/\.[^.]+$/, "").toLowerCase().trim();
+
+  // 흔한 기본값들
+  const bad = ["image", "photo", "camera", "file", "blob", "capture"];
+  if (bad.includes(base)) return true;
+
+  // 숫자만 (예: 6962)
+  if (/^\d{1,10}$/.test(base)) return true;
+
+  // 짧고 의미 없음
+  if (base.length <= 3) return true;
+
+  return false;
+}
+
+// ✅ 통일 파일명 생성: 업로더_날짜_공종_HHMMSS_순번.ext
+function makeNiceFilename({ uploader, date, workType, index, file }) {
+  const ext = getExt(file);
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  const seq = String(index + 1).padStart(2, "0");
+
+  const safeUploader = sanitizeFilename(uploader) || "업로더";
+  const safeDate = sanitizeFilename(date) || "날짜";
+  const safeType = sanitizeFilename(workType) || "공종";
+
+  return sanitizeFilename(`${safeUploader}_${safeDate}_${safeType}_${hh}${mm}${ss}_${seq}.${ext}`);
+}
+
+// ✅ “부모 폴더 안에서” 폴더 찾기/생성
 async function findOrCreateFolder(drive, name, parentId) {
   const escaped = name.replace(/'/g, "\\'");
   const q = [
@@ -90,16 +159,10 @@ async function findOrCreateFolder(drive, name, parentId) {
   return created.data.id;
 }
 
-async function uploadFileToDrive(drive, localPath, filename, parentId) {
+async function uploadFileToDrive(drive, localPath, filename, parentId, mimeType) {
   const res = await drive.files.create({
-    requestBody: {
-      name: filename,
-      parents: [parentId],
-    },
-    media: {
-      mimeType: "application/octet-stream",
-      body: fs.createReadStream(localPath),
-    },
+    requestBody: { name: filename, parents: [parentId] },
+    media: { mimeType: mimeType || "application/octet-stream", body: fs.createReadStream(localPath) },
     fields: "id, webViewLink",
     supportsAllDrives: true,
   });
@@ -108,6 +171,7 @@ async function uploadFileToDrive(drive, localPath, filename, parentId) {
 }
 
 app.use(express.static("public"));
+
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 // ✅ multipart: photos/photo/file 다 받기
@@ -130,22 +194,8 @@ const multiUpload = (req, res, next) => {
 
 app.post("/upload", multiUpload, async (req, res) => {
   try {
-    console.log("=== /upload hit ===");
-    console.log("content-type:", req.headers["content-type"]);
-    console.log("req.body:", req.body);
-    console.log("files:", (req.files || []).map(f => ({
-      fieldname: f.fieldname,
-      originalname: f.originalname,
-      size: f.size,
-      path: f.path,
-    })));
-
     if (!DRIVE_ROOT_FOLDER_ID) {
-      return res.status(500).json({
-        success: false,
-        message: "upload failed",
-        error: "Missing env DRIVE_ROOT_FOLDER_ID",
-      });
+      return res.status(500).json({ success: false, message: "upload failed", error: "Missing env DRIVE_ROOT_FOLDER_ID" });
     }
 
     const { date, workType, address, uploader, memo } = extractFields(req.body);
@@ -157,19 +207,11 @@ app.post("/upload", multiUpload, async (req, res) => {
     if (!uploader) missing.push("uploader");
 
     if (missing.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: "upload failed",
-        error: `Missing fields: ${missing.join("/")}`,
-      });
+      return res.status(400).json({ success: false, message: "upload failed", error: `Missing fields: ${missing.join("/")}` });
     }
 
     if (!req.files || req.files.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "upload failed",
-        error: "No files uploaded",
-      });
+      return res.status(400).json({ success: false, message: "upload failed", error: "No files uploaded" });
     }
 
     const drive = getDriveClient();
@@ -180,23 +222,37 @@ app.post("/upload", multiUpload, async (req, res) => {
     const typeFolderId = await findOrCreateFolder(drive, workType, dateFolderId);
 
     const links = [];
-    for (const f of req.files) {
-      const safeOriginal = (f.originalname || "file").replace(/[\\/:*?"<>|]/g, "_");
-      const filename = `${uploader}_${safeOriginal}`;
-      const uploaded = await uploadFileToDrive(drive, f.path, filename, typeFolderId);
+    const originalNames = [];
+
+    for (let i = 0; i < req.files.length; i++) {
+      const f = req.files[i];
+
+      // 원본명(복구) 저장용
+      const recovered = sanitizeFilename(fixMulterFilename(f.originalname || ""));
+      originalNames.push(recovered || "");
+
+      // ✅ 실제 업로드 파일명: 통일 규칙
+      // (원하면: recovered가 의미있을 때는 recovered도 섞을 수 있는데, 일단 100% 통일이 깔끔함)
+      const filename = makeNiceFilename({ uploader, date, workType, index: i, file: f });
+
+      const uploaded = await uploadFileToDrive(drive, f.path, filename, typeFolderId, f.mimetype);
       links.push(uploaded.webViewLink || "");
-      try { fs.unlinkSync(f.path); } catch (e) {}
+
+      try { fs.unlinkSync(f.path); } catch {}
     }
 
+    // 시트 기록(있을 때만)
     if (SPREADSHEET_ID) {
       const sheets = getSheetsClient();
       const now = new Date().toISOString();
       const linksCell = links.filter(Boolean).join("\n");
+      const origCell = originalNames.filter(Boolean).join("\n"); // 원본명도 남기고 싶으면
+
       await sheets.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A1`,
         valueInputOption: "USER_ENTERED",
-        requestBody: { values: [[date, workType, address, uploader, memo, linksCell, now]] },
+        requestBody: { values: [[date, workType, address, uploader, memo, linksCell, origCell, now]] },
       });
     }
 
@@ -205,11 +261,7 @@ app.post("/upload", multiUpload, async (req, res) => {
     console.error("🔥 upload error:", err?.message || err);
     if (err?.response?.data) console.error("🔥 response.data:", err.response.data);
 
-    return res.status(500).json({
-      success: false,
-      message: "upload failed",
-      error: err?.message || String(err),
-    });
+    return res.status(500).json({ success: false, message: "upload failed", error: err?.message || String(err) });
   }
 });
 
