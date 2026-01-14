@@ -53,7 +53,10 @@
     e.preventDefault();
     const formData = new FormData(form);
 
-    const response = await fetch('http://localhost:3000/upload', {
+    // ✅ 현재 접속한 서버(Render / 로컬 자동 인식)
+    const API_BASE = window.location.origin;
+
+    const response = await fetch(`${API_BASE}/upload`, {
       method: 'POST',
       body: formData
     });
@@ -62,10 +65,8 @@
       alert('업로드 완료!');
       form.reset();
     } else {
-      alert('업로드 실패');
+      const msg = await response.text().catch(() => '');
+      alert('업로드 실패\n' + msg);
     }
   });
 </script>
-
-</body>
-</html>
