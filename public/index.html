@@ -3,70 +3,122 @@
 <head>
   <meta charset="UTF-8" />
   <title>강원수도건설 현장관리 시스템</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
   <style>
-    body { font-family: Arial, sans-serif; margin: 40px; }
-    h1 { text-align: center; margin-bottom: 30px; }
-    label { display: block; margin-top: 15px; font-weight: bold; }
-    input, select { width: 100%; padding: 8px; margin-top: 5px; }
-    button { margin-top: 25px; padding: 12px; width: 100%; font-size: 16px; }
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 0;
+    }
+
+    .container {
+      max-width: 700px;
+      margin: 30px auto;
+      background: #fff;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    label {
+      display: block;
+      margin-top: 15px;
+      font-weight: bold;
+    }
+
+    input, select {
+      width: 100%;
+      padding: 10px;
+      margin-top: 5px;
+      box-sizing: border-box;
+    }
+
+    button {
+      margin-top: 25px;
+      width: 100%;
+      padding: 15px;
+      font-size: 16px;
+      background: #1976d2;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #125aa0;
+    }
   </style>
 </head>
+
 <body>
+  <div class="container">
+    <h1>강원수도건설 현장관리 시스템</h1>
 
-<div style="text-align:center; margin-bottom: 10px;">
-  <img src="/logo.png" alt="강원수도건설 로고" style="height:80px;">
-</div>
+    <form id="uploadForm">
+      <label>공사 날짜</label>
+      <input type="date" name="date" required />
 
-<h1>강원수도건설 현장관리 시스템</h1>
+      <label>공종</label>
+      <select name="category" required>
+        <option value="">선택</option>
+        <option value="관파">관파</option>
+        <option value="신설">신설</option>
+        <option value="함이설">함이설</option>
+        <option value="함신설">함신설</option>
+        <option value="계량팀">계량팀</option>
+        <option value="마상팀">마상팀</option>
+        <option value="기타">기타</option>
+      </select>
 
-<form id="uploadForm">
-  <label>공사 날짜</label>
-  <input type="date" name="workDate" required />
+      <label>주소</label>
+      <input type="text" name="address" placeholder="주소 입력" />
 
-  <label>공종</label>
-  <select name="workType" required>
-    <option value="관파">관파</option>
-    <option value="신설">신설</option>
-    <option value="함이설">함이설</option>
-    <option value="함신설">함신설</option>
-    <option value="계량팀">계량팀</option>
-    <option value="마상팀">마상팀</option>
-    <option value="기타">기타</option>
-  </select>
+      <label>업로더 이름</label>
+      <input type="text" name="uploader" placeholder="이름 입력" required />
 
-  <label>주소</label>
-  <input type="text" name="address" placeholder="주소 입력" />
+      <label>사진 선택</label>
+      <!-- 🔥 중요: name="file" -->
+      <input type="file" name="file" accept="image/*" required />
 
-  <label>업로더 이름</label>
-  <input type="text" name="uploader" placeholder="이름 입력" required />
+      <button type="submit">사진 업로드</button>
+    </form>
+  </div>
 
-  <label>사진 선택</label>
-  <input type="file" name="photos" multiple required />
+  <script>
+    const form = document.getElementById("uploadForm");
 
-  <button type="submit">사진 업로드</button>
-</form>
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
 
-<script>
-  const form = document.getElementById('uploadForm');
+      const formData = new FormData(form);
 
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const formData = new FormData(form);
+      try {
+        const res = await fetch("/upload", {
+          method: "POST",
+          body: formData
+        });
 
-    // ✅ 현재 접속한 서버(Render / 로컬 자동 인식)
-    const API_BASE = window.location.origin;
+        const data = await res.json();
 
-    const response = await fetch(`${API_BASE}/upload`, {
-      method: 'POST',
-      body: formData
+        if (data.success) {
+          alert("업로드 성공");
+          form.reset();
+        } else {
+          alert("업로드 실패\n" + JSON.stringify(data));
+        }
+      } catch (err) {
+        alert("서버 오류");
+        console.error(err);
+      }
     });
-
-    if (response.ok) {
-      alert('업로드 완료!');
-      form.reset();
-    } else {
-      const msg = await response.text().catch(() => '');
-      alert('업로드 실패\n' + msg);
-    }
-  });
-</script>
+  </script>
+</body>
+</html>
