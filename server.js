@@ -7,13 +7,16 @@ const { google } = require("googleapis");
 
 const app = express();
 app.use(cors());
-
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 const upload = multer({ dest: "uploads/" });
 
-const SHARED_DRIVE_ID = process.env.SHARED_DRIVE_ID || "0AGi8kzl6STpwUk9PVA";
+// ✅ 공유드라이브 루트 “폴더 ID” (URL의 /folders/<ID>)
+const DRIVE_ROOT_FOLDER_ID = process.env.DRIVE_ROOT_FOLDER_ID || "";
+if (!DRIVE_ROOT_FOLDER_ID) {
+  console.error("❌ Missing env DRIVE_ROOT_FOLDER_ID (shared drive root folder id from URL)");
+}
 
 function getServiceAccount() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -41,25 +44,35 @@ function getSheetsClient() {
   return google.sheets({ version: "v4", auth });
 }
 
+// (선택) 시트 기록용
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || "";
 const SHEET_NAME = process.env.SHEET_NAME || "Sheet1";
 
+function extractFields(body) {
+  const date = body.date || body.workDate || body.work_date || "";
+  const workType = body.workType || body.work_type || body.type || "";
+  const address = body.address || body.addr || body.location || "";
+  const uploader = body.uploader || body.uploaderName || body.name || "";
+  const memo = body.memo || body.note || "";
+  return { date, workType, address, uploader, memo };
+}
+
+// ✅ “부모 폴더 안에서” 폴더 찾기/생성 (driveId/corpora 안 씀)
 async function findOrCreateFolder(drive, name, parentId) {
   const escaped = name.replace(/'/g, "\\'");
   const q = [
     `name='${escaped}'`,
     `mimeType='application/vnd.google-apps.folder'`,
     "trashed=false",
-    parentId ? `'${parentId}' in parents` : null,
-  ].filter(Boolean).join(" and ");
+    `'${parentId}' in parents`,
+  ].join(" and ");
 
   const list = await drive.files.list({
     q,
     fields: "files(id,name)",
-    includeItemsFromAllDrives: true,
+    pageSize: 10,
     supportsAllDrives: true,
-    corpora: "drive",
-    driveId: SHARED_DRIVE_ID,
+    includeItemsFromAllDrives: true,
   });
 
   if (list.data.files && list.data.files.length > 0) return list.data.files[0].id;
@@ -68,8 +81,7 @@ async function findOrCreateFolder(drive, name, parentId) {
     requestBody: {
       name,
       mimeType: "application/vnd.google-apps.folder",
-      parents: parentId ? [parentId] : [],
-      driveId: SHARED_DRIVE_ID,
+      parents: [parentId],
     },
     fields: "id",
     supportsAllDrives: true,
@@ -83,7 +95,6 @@ async function uploadFileToDrive(drive, localPath, filename, parentId) {
     requestBody: {
       name: filename,
       parents: [parentId],
-      driveId: SHARED_DRIVE_ID,
     },
     media: {
       mimeType: "application/octet-stream",
@@ -96,24 +107,10 @@ async function uploadFileToDrive(drive, localPath, filename, parentId) {
   return res.data;
 }
 
-function extractFields(body) {
-  const date = body.date || body.workDate || body.work_date || "";
-  const workType = body.workType || body.work_type || body.type || "";
-  const address = body.address || body.addr || body.location || "";
-  const uploader = body.uploader || body.uploaderName || body.name || "";
-  const memo = body.memo || body.note || "";
-  return { date, workType, address, uploader, memo };
-}
-
-// ✅ 정적 폴더
 app.use(express.static("public"));
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-// ✅ 루트(/)는 무조건 index.html 보여주기 (OK 화면 방지)
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
-
-// ✅ multipart 업로드: photos / photo / file 어떤 이름이든 받기
+// ✅ multipart: photos/photo/file 다 받기
 const multiUpload = (req, res, next) => {
   const u1 = upload.array("photos", 30);
   const u2 = upload.array("photo", 30);
@@ -133,17 +130,23 @@ const multiUpload = (req, res, next) => {
 
 app.post("/upload", multiUpload, async (req, res) => {
   try {
-    console.log("=== /upload hit (multipart or form) ===");
+    console.log("=== /upload hit ===");
     console.log("content-type:", req.headers["content-type"]);
     console.log("req.body:", req.body);
-    console.log(
-      "files:",
-      (req.files || []).map((f) => ({
-        fieldname: f.fieldname,
-        originalname: f.originalname,
-        size: f.size,
-      }))
-    );
+    console.log("files:", (req.files || []).map(f => ({
+      fieldname: f.fieldname,
+      originalname: f.originalname,
+      size: f.size,
+      path: f.path,
+    })));
+
+    if (!DRIVE_ROOT_FOLDER_ID) {
+      return res.status(500).json({
+        success: false,
+        message: "upload failed",
+        error: "Missing env DRIVE_ROOT_FOLDER_ID",
+      });
+    }
 
     const { date, workType, address, uploader, memo } = extractFields(req.body);
 
@@ -154,7 +157,6 @@ app.post("/upload", multiUpload, async (req, res) => {
     if (!uploader) missing.push("uploader");
 
     if (missing.length > 0) {
-      console.log("❌ Missing fields:", missing);
       return res.status(400).json({
         success: false,
         message: "upload failed",
@@ -163,7 +165,6 @@ app.post("/upload", multiUpload, async (req, res) => {
     }
 
     if (!req.files || req.files.length === 0) {
-      console.log("❌ No files uploaded");
       return res.status(400).json({
         success: false,
         message: "upload failed",
@@ -173,13 +174,14 @@ app.post("/upload", multiUpload, async (req, res) => {
 
     const drive = getDriveClient();
 
-    const rootFolderId = await findOrCreateFolder(drive, "공사사진", null);
+    // ✅ 공유드라이브 루트 폴더 아래에 공사사진/날짜/공종
+    const rootFolderId = await findOrCreateFolder(drive, "공사사진", DRIVE_ROOT_FOLDER_ID);
     const dateFolderId = await findOrCreateFolder(drive, date, rootFolderId);
     const typeFolderId = await findOrCreateFolder(drive, workType, dateFolderId);
 
     const links = [];
     for (const f of req.files) {
-      const safeOriginal = f.originalname.replace(/[\\/:*?"<>|]/g, "_");
+      const safeOriginal = (f.originalname || "file").replace(/[\\/:*?"<>|]/g, "_");
       const filename = `${uploader}_${safeOriginal}`;
       const uploaded = await uploadFileToDrive(drive, f.path, filename, typeFolderId);
       links.push(uploaded.webViewLink || "");
@@ -196,17 +198,17 @@ app.post("/upload", multiUpload, async (req, res) => {
         valueInputOption: "USER_ENTERED",
         requestBody: { values: [[date, workType, address, uploader, memo, linksCell, now]] },
       });
-    } else {
-      console.log("⚠️ SPREADSHEET_ID not set → skip sheet append");
     }
 
     return res.json({ success: true, message: "uploaded", links });
   } catch (err) {
-    console.error("🔥 upload error:", err);
+    console.error("🔥 upload error:", err?.message || err);
+    if (err?.response?.data) console.error("🔥 response.data:", err.response.data);
+
     return res.status(500).json({
       success: false,
       message: "upload failed",
-      error: err.message || String(err),
+      error: err?.message || String(err),
     });
   }
 });
