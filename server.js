@@ -253,21 +253,32 @@ app.post("/upload", multiUpload, async (req, res) => {
     }
 
     // ✅ 시트 기록(있을 때만)
-    // ✅ 변경: 링크는 “첫번째(대표사진)만” 저장
-    if (SPREADSHEET_ID) {
-      const sheets = getSheetsClient();
-      const now = new Date().toISOString();
+// ✅ 대표사진 링크만 저장 / 원본파일명 컬럼은 비움
+if (SPREADSHEET_ID) {
+  const sheets = getSheetsClient();
+  const now = new Date().toISOString();
 
-      const representativeLink = (links[0] || "");   // ✅ 대표사진 링크(첫번째)
-      const origCell = originalNames.filter(Boolean).join("\n");
+  const representativeLink = links[0] || ""; // 대표사진 링크 (첫번째)
 
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A1`,
-        valueInputOption: "USER_ENTERED",
-        requestBody: { values: [[date, workType, address, uploader, memo, representativeLink, origCell, now]] },
-      });
-    }
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!A1`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[
+        date,
+        workType,
+        address,
+        uploader,
+        memo,
+        representativeLink,
+        "",        // ✅ 원본파일명 컬럼 비움
+        now
+      ]]
+    },
+  });
+}
+
 
     // 응답은 기존처럼 업로드된 링크 전체를 내려줌(프론트에서 필요하면 사용 가능)
     return res.json({ success: true, message: "uploaded", links });
