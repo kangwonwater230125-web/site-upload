@@ -1,3 +1,10 @@
+/**
+ * server.js (Render + Google Shared Drive 업로드용 / 전체 복붙용)
+ * - Shared Drive(공유드라이브)에서 폴더 생성/검색을 올바르게 처리
+ * - 업로드 후 임시파일 삭제
+ * - (선택) 스프레드시트 기록은 기존에 네가 쓰던 부분이 있으면 거기에 붙이면 됨
+ */
+
 const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
@@ -10,190 +17,169 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ===============================
-// ✅ 기본 설정
-// ===============================
-const PORT = process.env.PORT || 10000;
-const BASE_URL =
-  process.env.BASE_URL || `http://localhost:${PORT}`;
-
-// ✅ 스프레드시트
-const SHEET_ID = "1U9ZnKg8j7WmR8HYlMhN55fWjPBXVogyyzVQDiS3PkkY";
-const SHEET_NAME = "시트1"; // 탭 이름
-
-// ✅ 업로드 임시 저장 (Render 디스크는 영구저장 아님 → 업로드 후 삭제)
+// Render는 디스크 영구 저장 아님 → 업로드 후 바로 삭제
 const upload = multer({ dest: "uploads/" });
 
-// ✅ (중요) 업로드할 "공사사진" 폴더 ID
-// 네가 보여준 링크가 이 폴더라면 그대로 사용
-const ROOT_FOLDER_ID = "0AGi8kzl6STpwUk9PVA"; 
-// ↑ 이게 "공유 드라이브 ID"일 수도 있고 "폴더 ID"일 수도 있어서
-// 아래에서 자동으로 안전하게 처리함
+// ✅ 공유 드라이브 ID
+const SHARED_DRIVE_ID = "0AGi8kzl6STpwUk9PVA";
 
-// ===============================
-// ✅ Google API Client
-// ===============================
-function getGoogleClients() {
+// ✅ 최상위 폴더명(공유드라이브 루트에 이 폴더 생성/사용)
+const TOP_FOLDER_NAME = "공사사진";
+
+// ✅ 서비스계정 JSON (Render Env: GOOGLE_SERVICE_ACCOUNT_JSON)
+function getServiceAccountFromEnv() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   if (!raw) throw new Error("Missing env GOOGLE_SERVICE_ACCOUNT_JSON");
 
-  let creds;
-  try {
-    creds = JSON.parse(raw);
-  } catch {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON string");
-  }
-
-  const auth = new google.auth.GoogleAuth({
-    credentials: creds,
-    scopes: [
-      "https://www.googleapis.com/auth/drive",
-      "https://www.googleapis.com/auth/spreadsheets",
-    ],
-  });
-
-  const drive = google.drive({ version: "v3", auth });
-  const sheets = google.sheets({ version: "v4", auth });
-  return { drive, sheets };
+  // Render에 JSON을 문자열로 저장하면 \n 형태로 들어갈 수 있어 복원
+  // (이미 정상 JSON이면 그대로 parse 됨)
+  const fixed = raw.replace(/\\n/g, "\n");
+  return JSON.parse(fixed);
 }
 
-// ===============================
-// ✅ 폴더 찾기/생성 유틸 (공유드라이브/내드라이브 모두 대응)
-// ===============================
-async function getOrCreateFolder(drive, folderName, parentId) {
-  // parentId 아래에 folderName 폴더가 있는지 검색
-  const safeName = String(folderName).replace(/'/g, "\\'");
+const sa = getServiceAccountFromEnv();
 
-  const q = [
+const auth = new google.auth.GoogleAuth({
+  credentials: sa,
+  scopes: [
+    "https://www.googleapis.com/auth/drive",
+    // 스프레드시트까지 쓰면 아래 scope도 필요
+    // "https://www.googleapis.com/auth/spreadsheets",
+  ],
+});
+
+const drive = google.drive({ version: "v3", auth });
+
+// ✅ Shared Drive에서 폴더를 안전하게 찾거나 생성
+// 핵심: Shared Drive ID를 'parents'로 검색하지 않고,
+// corpora:'drive' + driveId로 "범위"를 고정한 뒤 폴더를 찾는다.
+async function getOrCreateFolder(folderName, parentId = null) {
+  const safeName = folderName.replace(/'/g, "\\'");
+
+  const qParts = [
     `name='${safeName}'`,
     `mimeType='application/vnd.google-apps.folder'`,
     `trashed=false`,
-    `'${parentId}' in parents`,
-  ].join(" and ");
+  ];
 
-  const listRes = await drive.files.list({
-    q,
+  // parentId가 있을 때만 parents 조건을 건다.
+  if (parentId) qParts.push(`'${parentId}' in parents`);
+
+  const res = await drive.files.list({
+    q: qParts.join(" and "),
     fields: "files(id, name)",
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
+    corpora: "drive",
+    driveId: SHARED_DRIVE_ID,
   });
 
-  if (listRes.data.files && listRes.data.files.length > 0) {
-    return listRes.data.files[0].id;
+  if (res.data.files && res.data.files.length > 0) {
+    return res.data.files[0].id;
   }
 
-  const createRes = await drive.files.create({
-    supportsAllDrives: true,
+  // 없으면 생성
+  const created = await drive.files.create({
     requestBody: {
       name: folderName,
       mimeType: "application/vnd.google-apps.folder",
-      parents: [parentId],
+      // parentId가 없으면 shared drive 루트에 생성
+      parents: parentId ? [parentId] : [SHARED_DRIVE_ID],
     },
     fields: "id",
+    supportsAllDrives: true,
   });
 
-  return createRes.data.id;
+  return created.data.id;
 }
 
-// ===============================
-// ✅ 시트에 한줄 추가
-// A: workDate
-// B: workType
-// C: address
-// D: uploader
-// E: 계약명(빈칸)
-// F: 대표사진 링크
-// ===============================
-async function appendToSheet(sheets, row) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A:F`,
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [row] },
-  });
-}
+// ✅ 헬스체크
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
 
-// ===============================
+// ✅ 프론트 정적 파일(있으면)
+app.use(express.static(path.join(__dirname, "public")));
+
 // ✅ 업로드 API
-// ===============================
-app.post("/upload", upload.array("photos"), async (req, res) => {
+// form-data:
+// - date: YYYY-MM-DD
+// - workType: 공종
+// - address: 주소(옵션)
+// - uploader: 업로더(옵션)
+// - photo: 파일
+app.post("/upload", upload.single("photo"), async (req, res) => {
   try {
-    const { workDate, workType, address, uploader } = req.body;
+    const { date, workType, address, uploader } = req.body;
+    const file = req.file;
 
-    if (!workDate || !workType || !uploader) {
-      return res.status(400).json({
-        success: false,
-        message: "workDate/workType/uploader required",
-      });
+    if (!file) {
+      return res.status(400).json({ success: false, message: "no file" });
+    }
+    if (!date || !workType) {
+      // date/workType 필수
+      fs.unlinkSync(file.path);
+      return res
+        .status(400)
+        .json({ success: false, message: "missing date/workType" });
     }
 
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ success: false, message: "no files" });
-    }
+    // 1) 공유드라이브 루트 밑에 "공사사진"
+    const topFolderId = await getOrCreateFolder(TOP_FOLDER_NAME);
 
-    const { drive, sheets } = getGoogleClients();
+    // 2) 날짜 폴더
+    const dateFolderId = await getOrCreateFolder(date, topFolderId);
 
-    // 1) 날짜 폴더 생성 (공사사진 폴더 아래)
-    const dateFolderId = await getOrCreateFolder(drive, workDate, ROOT_FOLDER_ID);
+    // 3) 공종 폴더
+    const workFolderId = await getOrCreateFolder(workType, dateFolderId);
 
-    // 2) 공종 폴더 생성 (날짜 폴더 아래)
-    const typeFolderId = await getOrCreateFolder(drive, workType, dateFolderId);
+    // 파일명 충돌 방지(원하면 시간 붙이기)
+    const safeOriginal = file.originalname || "photo";
+    const finalName = safeOriginal;
 
-    // 3) 파일 업로드
-    const uploadedLinks = [];
+    // 4) Drive 업로드
+    const driveRes = await drive.files.create({
+      requestBody: {
+        name: finalName,
+        parents: [workFolderId],
+      },
+      media: {
+        mimeType: file.mimetype,
+        body: fs.createReadStream(file.path),
+      },
+      fields: "id, webViewLink",
+      supportsAllDrives: true,
+    });
 
-    for (const file of req.files) {
-      const safeUploader = String(uploader).replace(/\s+/g, "");
-      const ext = path.extname(file.originalname) || "";
-      const fileName = `${workDate.replace(/-/g, "")}_${workType}_${safeUploader}_${Date.now()}${ext}`;
+    // 5) 임시파일 삭제
+    fs.unlinkSync(file.path);
 
-      const fileRes = await drive.files.create({
-        supportsAllDrives: true,
-        requestBody: {
-          name: fileName,
-          parents: [typeFolderId],
-        },
-        media: {
-          mimeType: file.mimetype,
-          body: fs.createReadStream(file.path),
-        },
-        fields: "id, webViewLink",
-      });
-
-      uploadedLinks.push(fileRes.data.webViewLink);
-
-      // 임시 파일 삭제
-      try {
-        fs.unlinkSync(file.path);
-      } catch (_) {}
-    }
-
-    // 대표 링크 = 첫번째 사진
-    const 대표링크 = uploadedLinks[0] || "";
-    const 계약명 = ""; // 웹에는 없으니 빈칸 저장
-
-    // 4) 시트 기록
-    await appendToSheet(sheets, [
-      workDate,
-      workType,
-      address || "",
-      uploader,
-      계약명,
-      대표링크,
-    ]);
+    // (선택) 여기서 스프레드시트 기록 로직 붙이면 됨
+    // date, workType, address, uploader, driveRes.data.webViewLink 등 사용
 
     return res.json({
       success: true,
-      link: 대표링크,
-      links: uploadedLinks,
+      message: "uploaded",
+      fileId: driveRes.data.id,
+      link: driveRes.data.webViewLink,
+      meta: { date, workType, address: address || "", uploader: uploader || "" },
     });
   } catch (err) {
     console.error("UPLOAD ERROR:", err);
+
+    // multer 임시파일 남아있으면 지우기(에러 시도)
+    try {
+      if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (_) {}
+
     return res.status(500).json({ success: false, message: "upload failed" });
   }
 });
 
+// ✅ Render 포트 바인딩
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("서버 실행중:", PORT);
-  console.log("BASE_URL:", BASE_URL);
+  console.log(`Server listening on ${PORT}`);
 });
