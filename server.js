@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const { google } = require('googleapis');
+const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+
 
 const app = express();
 app.use(cors());
@@ -61,7 +63,8 @@ app.post('/upload', upload.array('photos'), async (req, res) => {
         .split(path.sep)
         .join('/');
 
-      대표링크 = `http://localhost:3000/files/${relPath}`;
+      대표링크 = `${BASE_URL}/files/${relPath}`;
+
     }
 
     const 계약명 = ''; // 웹에는 없으니 빈칸 저장 (나중에 직접 입력)
@@ -87,7 +90,7 @@ const SHEET_NAME = '시트1'; // ← 시트 탭 이름(대부분 시트1)
 
 async function appendToSheet(row) {
   const auth = new google.auth.GoogleAuth({
-    keyFile: path.join(__dirname, 'credentials.json'),
+    keyFile: '/etc/secrets/credentials.json',
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
 
