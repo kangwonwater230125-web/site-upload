@@ -19,6 +19,16 @@ const SERVICE_ACCOUNT_FILE =
   process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "/etc/secrets/credentials.json";
 
 /* =========================
+   ✅ PUBLIC 정적 서빙 (여기 중요)
+========================= */
+app.use(express.static(path.join(__dirname, "public")));
+
+// 루트(/)로 들어오면 public/index.html 반환
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+/* =========================
    GOOGLE AUTH
 ========================= */
 if (!fs.existsSync(SERVICE_ACCOUNT_FILE)) {
@@ -33,8 +43,8 @@ const auth = new google.auth.GoogleAuth({
 const drive = google.drive({ version: "v3", auth });
 
 /* =========================
-   MULTER (중요)
-   👉 field name 무조건 'file'
+   MULTER
+   👉 input name 무조건 'file'
 ========================= */
 const upload = multer({ dest: "uploads/" });
 
@@ -49,9 +59,7 @@ app.get("/health", (_, res) => {
    FOLDER UTILS
 ========================= */
 async function getOrCreateFolder(name, parentId) {
-  if (!name || !name.trim()) {
-    throw new Error("Folder name is empty");
-  }
+  if (!name || !name.trim()) throw new Error("Folder name is empty");
 
   const q = [
     `name='${name}'`,
@@ -68,9 +76,7 @@ async function getOrCreateFolder(name, parentId) {
     fields: "files(id, name)",
   });
 
-  if (list.data.files.length > 0) {
-    return list.data.files[0].id;
-  }
+  if (list.data.files.length > 0) return list.data.files[0].id;
 
   const created = await drive.files.create({
     supportsAllDrives: true,
@@ -89,15 +95,14 @@ async function getOrCreateFolder(name, parentId) {
 ========================= */
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    /* 🔥 여기 제일 중요 */
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: "No file received",
+        message: "No file received (field name must be 'file')",
       });
     }
 
-    const { date, category, address, uploader } = req.body;
+    const { date, category } = req.body;
 
     const rootFolderId = await getOrCreateFolder("공사사진", SHARED_DRIVE_ID);
     const dateFolderId = await getOrCreateFolder(date, rootFolderId);
