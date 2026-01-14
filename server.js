@@ -195,7 +195,11 @@ const multiUpload = (req, res, next) => {
 app.post("/upload", multiUpload, async (req, res) => {
   try {
     if (!DRIVE_ROOT_FOLDER_ID) {
-      return res.status(500).json({ success: false, message: "upload failed", error: "Missing env DRIVE_ROOT_FOLDER_ID" });
+      return res.status(500).json({
+        success: false,
+        message: "upload failed",
+        error: "Missing env DRIVE_ROOT_FOLDER_ID",
+      });
     }
 
     const { date, workType, address, uploader, memo } = extractFields(req.body);
@@ -207,11 +211,19 @@ app.post("/upload", multiUpload, async (req, res) => {
     if (!uploader) missing.push("uploader");
 
     if (missing.length > 0) {
-      return res.status(400).json({ success: false, message: "upload failed", error: `Missing fields: ${missing.join("/")}` });
+      return res.status(400).json({
+        success: false,
+        message: "upload failed",
+        error: `Missing fields: ${missing.join("/")}`,
+      });
     }
 
     if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ success: false, message: "upload failed", error: "No files uploaded" });
+      return res.status(400).json({
+        success: false,
+        message: "upload failed",
+        error: "No files uploaded",
+      });
     }
 
     const drive = getDriveClient();
@@ -232,7 +244,6 @@ app.post("/upload", multiUpload, async (req, res) => {
       originalNames.push(recovered || "");
 
       // ✅ 실제 업로드 파일명: 통일 규칙
-      // (원하면: recovered가 의미있을 때는 recovered도 섞을 수 있는데, 일단 100% 통일이 깔끔함)
       const filename = makeNiceFilename({ uploader, date, workType, index: i, file: f });
 
       const uploaded = await uploadFileToDrive(drive, f.path, filename, typeFolderId, f.mimetype);
@@ -241,21 +252,24 @@ app.post("/upload", multiUpload, async (req, res) => {
       try { fs.unlinkSync(f.path); } catch {}
     }
 
-    // 시트 기록(있을 때만)
+    // ✅ 시트 기록(있을 때만)
+    // ✅ 변경: 링크는 “첫번째(대표사진)만” 저장
     if (SPREADSHEET_ID) {
       const sheets = getSheetsClient();
       const now = new Date().toISOString();
-      const linksCell = links.filter(Boolean).join("\n");
-      const origCell = originalNames.filter(Boolean).join("\n"); // 원본명도 남기고 싶으면
+
+      const representativeLink = (links[0] || "");   // ✅ 대표사진 링크(첫번째)
+      const origCell = originalNames.filter(Boolean).join("\n");
 
       await sheets.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A1`,
         valueInputOption: "USER_ENTERED",
-        requestBody: { values: [[date, workType, address, uploader, memo, linksCell, origCell, now]] },
+        requestBody: { values: [[date, workType, address, uploader, memo, representativeLink, origCell, now]] },
       });
     }
 
+    // 응답은 기존처럼 업로드된 링크 전체를 내려줌(프론트에서 필요하면 사용 가능)
     return res.json({ success: true, message: "uploaded", links });
   } catch (err) {
     console.error("🔥 upload error:", err?.message || err);
@@ -267,3 +281,4 @@ app.post("/upload", multiUpload, async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("Server listening on", PORT));
+
