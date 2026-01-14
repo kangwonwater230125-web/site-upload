@@ -1,122 +1,120 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <title>강원수도건설 현장관리 시스템</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
+  <title>강원수도건설 현장관리 시스템</title>
   <style>
-    body {
-      font-family: Arial, Helvetica, sans-serif;
-      background: #f4f4f4;
-      margin: 0;
-      padding: 0;
-    }
-
-    .container {
-      max-width: 700px;
-      margin: 30px auto;
-      background: #fff;
-      padding: 20px;
-      border-radius: 8px;
-      box-shadow: 0 0 10px rgba(0,0,0,0.1);
-    }
-
-    h1 {
-      text-align: center;
-      margin-bottom: 30px;
-    }
-
-    label {
-      display: block;
-      margin-top: 15px;
-      font-weight: bold;
-    }
-
-    input, select {
-      width: 100%;
-      padding: 10px;
-      margin-top: 5px;
-      box-sizing: border-box;
-    }
-
-    button {
-      margin-top: 25px;
-      width: 100%;
-      padding: 15px;
-      font-size: 16px;
-      background: #1976d2;
-      color: #fff;
-      border: none;
-      border-radius: 5px;
-      cursor: pointer;
-    }
-
-    button:hover {
-      background: #125aa0;
-    }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background:#f5f7fb; }
+    .wrap { max-width: 720px; margin: 24px auto; padding: 16px; }
+    .card { background:#fff; border-radius: 12px; padding: 18px; box-shadow: 0 8px 20px rgba(0,0,0,.06); }
+    .header { display:flex; align-items:center; gap: 12px; margin-bottom: 16px; }
+    .logo { width: 56px; height: 56px; border-radius: 12px; background:#e9eefc; display:flex; align-items:center; justify-content:center; font-weight:700; }
+    h1 { margin: 0; font-size: 26px; }
+    label { display:block; margin-top: 14px; font-weight: 700; }
+    input, select, textarea { width: 100%; padding: 12px; margin-top: 6px; border: 1px solid #d7dbe7; border-radius: 10px; font-size: 15px; }
+    button { width: 100%; margin-top: 18px; padding: 14px; border: 0; border-radius: 10px; font-size: 16px; font-weight: 800; background:#123b63; color:#fff; cursor:pointer; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .hint { font-size: 13px; color:#58657a; margin-top: 8px; }
   </style>
 </head>
-
 <body>
-  <div class="container">
-    <h1>강원수도건설 현장관리 시스템</h1>
+  <div class="wrap">
+    <div class="card">
+      <div class="header">
+        <div class="logo">KW</div>
+        <div>
+          <h1>강원수도건설 현장관리 시스템</h1>
+          <div class="hint">사진 업로드 → 드라이브 폴더 생성 + 스프레드시트 자동 기록</div>
+        </div>
+      </div>
 
-    <form id="uploadForm">
-      <label>공사 날짜</label>
-      <input type="date" name="date" required />
+      <form id="uploadForm">
+        <label>공사 날짜</label>
+        <input type="date" id="date" required />
 
-      <label>공종</label>
-      <select name="category" required>
-        <option value="">선택</option>
-        <option value="관파">관파</option>
-        <option value="신설">신설</option>
-        <option value="함이설">함이설</option>
-        <option value="함신설">함신설</option>
-        <option value="계량팀">계량팀</option>
-        <option value="마상팀">마상팀</option>
-        <option value="기타">기타</option>
-      </select>
+        <label>공종</label>
+        <select id="workType" required>
+          <option value="">선택</option>
+          <option value="관파">관파</option>
+          <option value="신설">신설</option>
+          <option value="계량팀">계량팀</option>
+          <option value="함이설">함이설</option>
+          <option value="함신설">함신설</option>
+          <option value="마상팀">마상팀</option>
+          <option value="기타">기타</option>
+        </select>
 
-      <label>주소</label>
-      <input type="text" name="address" placeholder="주소 입력" />
+        <label>주소</label>
+        <input type="text" id="address" placeholder="예) 원주시 ○○로 123" required />
 
-      <label>업로더 이름</label>
-      <input type="text" name="uploader" placeholder="이름 입력" required />
+        <label>업로더 이름</label>
+        <input type="text" id="uploader" placeholder="예) 박광흠" required />
 
-      <label>사진 선택</label>
-      <!-- 🔥 중요: name="file" -->
-      <input type="file" name="file" accept="image/*" required />
+        <label>메모(선택)</label>
+        <textarea id="memo" rows="3" placeholder="간단 메모"></textarea>
 
-      <button type="submit">사진 업로드</button>
-    </form>
+        <label>사진 선택</label>
+        <!-- ✅ 서버 multer가 받는 name = photos -->
+        <input type="file" id="photos" name="photos" accept="image/*" multiple required />
+
+        <button id="btn" type="submit">사진 업로드</button>
+        <div class="hint" id="status"></div>
+      </form>
+    </div>
   </div>
 
   <script>
     const form = document.getElementById("uploadForm");
+    const btn = document.getElementById("btn");
+    const statusEl = document.getElementById("status");
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
 
-      const formData = new FormData(form);
+      btn.disabled = true;
+      statusEl.textContent = "업로드 중...";
+
+      const date = document.getElementById("date").value;
+      const workType = document.getElementById("workType").value;
+      const address = document.getElementById("address").value.trim();
+      const uploader = document.getElementById("uploader").value.trim();
+      const memo = document.getElementById("memo").value.trim();
+      const files = document.getElementById("photos").files;
+
+      const fd = new FormData();
+
+      // ✅ 서버가 찾는 key 이름 그대로 보냄
+      fd.append("date", date);
+      fd.append("workType", workType);
+      fd.append("address", address);
+      fd.append("uploader", uploader);
+      fd.append("memo", memo);
+
+      for (const f of files) fd.append("photos", f);
 
       try {
         const res = await fetch("/upload", {
           method: "POST",
-          body: formData
+          body: fd,
+          // ⚠️ 여기서 Content-Type 수동 설정하면 안됨 (브라우저가 boundary 붙여야 함)
         });
 
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
 
-        if (data.success) {
-          alert("업로드 성공");
-          form.reset();
+        if (!res.ok) {
+          alert(`업로드 실패\n${JSON.stringify(data)}`);
+          statusEl.textContent = "업로드 실패";
         } else {
-          alert("업로드 실패\n" + JSON.stringify(data));
+          alert("업로드 성공!");
+          statusEl.textContent = `업로드 성공 (${data.uploadedCount || 0}장)`;
+          form.reset();
         }
       } catch (err) {
-        alert("서버 오류");
-        console.error(err);
+        alert("업로드 실패\n" + err.message);
+        statusEl.textContent = "업로드 실패";
+      } finally {
+        btn.disabled = false;
       }
     });
   </script>

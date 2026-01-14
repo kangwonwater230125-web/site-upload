@@ -7,181 +7,240 @@ const { google } = require("googleapis");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+
+// ✅ JSON / urlencoded도 받기 (프론트가 JSON으로 보내도 대응)
+app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ---------- 기본 설정 ----------
-const PORT = process.env.PORT || 10000;
-
-// ✅ 공유드라이브 ID (지금 너 URL에 보이는 그거)
-const SHARED_DRIVE_ID = process.env.SHARED_DRIVE_ID || "0AGi8kzl6STpwUk9PVA";
-
-// ✅ Render Secret Files로 넣었으면 이 경로로 읽힘
-// Environment Variables에 GOOGLE_SERVICE_ACCOUNT_FILE=/etc/secrets/credentials.json 로 세팅된 상태면 자동 사용
-const SERVICE_ACCOUNT_FILE =
-  process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "/etc/secrets/credentials.json";
-
-// 업로드 임시 저장 폴더(Render 디스크 영구 아님 → 업로드 후 삭제)
+// ✅ multer (multipart/form-data 대응)
 const upload = multer({ dest: "uploads/" });
 
-// ---------- 서비스계정 로드 ----------
+// ✅ Render env
+const SHARED_DRIVE_ID = process.env.SHARED_DRIVE_ID || "0AGi8kzl6STpwUk9PVA";
+
 function getServiceAccount() {
-  // 1) JSON 문자열 환경변수
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    try {
-      return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    } catch (e) {
-      throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON");
-    }
-  }
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) throw new Error("Missing env GOOGLE_SERVICE_ACCOUNT_JSON");
 
-  // 2) Secret File 경로(기본 /etc/secrets/credentials.json)
-  if (fs.existsSync(SERVICE_ACCOUNT_FILE)) {
-    const raw = fs.readFileSync(SERVICE_ACCOUNT_FILE, "utf8");
-    return JSON.parse(raw);
-  }
-
-  // 3) 로컬 fallback
-  const localPath = path.join(__dirname, "credentials.json");
-  if (fs.existsSync(localPath)) {
-    const raw = fs.readFileSync(localPath, "utf8");
-    return JSON.parse(raw);
-  }
-
-  throw new Error(
-    "Missing service account credentials. Set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_FILE (/etc/secrets/credentials.json)."
-  );
+  const obj = JSON.parse(raw);
+  if (obj.private_key) obj.private_key = obj.private_key.replace(/\\n/g, "\n");
+  return obj;
 }
 
-const serviceAccount = getServiceAccount();
+function getDriveClient() {
+  const sa = getServiceAccount();
+  const auth = new google.auth.GoogleAuth({
+    credentials: sa,
+    scopes: ["https://www.googleapis.com/auth/drive"],
+  });
+  return google.drive({ version: "v3", auth });
+}
 
-const auth = new google.auth.GoogleAuth({
-  credentials: serviceAccount,
-  scopes: ["https://www.googleapis.com/auth/drive"],
-});
+function getSheetsClient() {
+  const sa = getServiceAccount();
+  const auth = new google.auth.GoogleAuth({
+    credentials: sa,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+  return google.sheets({ version: "v4", auth });
+}
 
-const drive = google.drive({ version: "v3", auth });
+// (선택) 시트 기록용 - 없으면 자동 스킵
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || "";
+const SHEET_NAME = process.env.SHEET_NAME || "Sheet1";
 
-// ---------- 유틸: 폴더 생성/조회 (공유드라이브 루트 기준) ----------
-async function getOrCreateFolder(name, parentId) {
-  const parent = parentId || SHARED_DRIVE_ID;
-
-  // ✅ 핵심: "공유드라이브 driveId/corpora"로 꼬지 말고,
-  // 부모폴더 기준으로 찾는다. (공유드라이브든 내드라이브든 상관없이 안전)
+// ✅ 폴더 찾기/생성
+async function findOrCreateFolder(drive, name, parentId) {
+  const escaped = name.replace(/'/g, "\\'");
   const q = [
-    `'${parent}' in parents`,
-    `name='${name.replace(/'/g, "\\'")}'`,
+    `name='${escaped}'`,
     `mimeType='application/vnd.google-apps.folder'`,
-    `trashed=false`,
-  ].join(" and ");
+    "trashed=false",
+    parentId ? `'${parentId}' in parents` : null,
+  ]
+    .filter(Boolean)
+    .join(" and ");
 
-  const listRes = await drive.files.list({
+  const list = await drive.files.list({
     q,
-    fields: "files(id, name)",
-    supportsAllDrives: true,
+    fields: "files(id,name)",
     includeItemsFromAllDrives: true,
+    supportsAllDrives: true,
+    corpora: "drive",
+    driveId: SHARED_DRIVE_ID,
   });
 
-  if (listRes.data.files && listRes.data.files.length > 0) {
-    return listRes.data.files[0].id;
-  }
+  if (list.data.files && list.data.files.length > 0) return list.data.files[0].id;
 
-  const createRes = await drive.files.create({
+  const created = await drive.files.create({
     requestBody: {
       name,
       mimeType: "application/vnd.google-apps.folder",
-      parents: [parent],
+      parents: parentId ? [parentId] : [],
+      driveId: SHARED_DRIVE_ID,
     },
     fields: "id",
     supportsAllDrives: true,
   });
 
-  return createRes.data.id;
+  return created.data.id;
 }
 
-// ---------- 정적 페이지(사이트) ----------
-app.use(express.static(path.join(__dirname, "public")));
+async function uploadFileToDrive(drive, localPath, filename, parentId) {
+  const res = await drive.files.create({
+    requestBody: {
+      name: filename,
+      parents: [parentId],
+      driveId: SHARED_DRIVE_ID,
+    },
+    media: {
+      mimeType: "application/octet-stream",
+      body: fs.createReadStream(localPath),
+    },
+    fields: "id, webViewLink",
+    supportsAllDrives: true,
+  });
 
-app.get("/", (req, res) => {
-  // public/index.html 있으면 그걸 보여줌
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
+  return res.data;
+}
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
+app.get("/", (req, res) => res.send("OK"));
 
-// ---------- 업로드 API ----------
-app.post("/upload", upload.any(), async (req, res) => {
+// ✅ 공통: body에서 필드 뽑기 (키 이름 다 달라도 흡수)
+function extractFields(body) {
+  const date = body.date || body.workDate || body.work_date || "";
+  const workType = body.workType || body.work_type || body.type || "";
+  const address = body.address || body.addr || body.location || "";
+  const uploader = body.uploader || body.uploaderName || body.name || "";
+  const memo = body.memo || body.note || "";
+  return { date, workType, address, uploader, memo };
+}
+
+// ✅ 1) multipart/form-data 업로드 (파일 포함)
+// 여기서 "photos" / "photo" / "file" 어떤 이름으로 와도 받게 3개 다 허용
+const multiUpload = (req, res, next) => {
+  const u1 = upload.array("photos", 30);
+  const u2 = upload.array("photo", 30);
+  const u3 = upload.array("file", 30);
+
+  u1(req, res, (err) => {
+    if (!err) return next();
+    u2(req, res, (err2) => {
+      if (!err2) return next();
+      u3(req, res, (err3) => {
+        if (!err3) return next();
+        return next(err3);
+      });
+    });
+  });
+};
+
+app.post("/upload", multiUpload, async (req, res) => {
   try {
-    // ✅ multer 필드명 꼬여도 무조건 받게 처리
-    const files = req.files || [];
-    if (files.length === 0) {
+    console.log("=== /upload hit (multipart or form) ===");
+    console.log("content-type:", req.headers["content-type"]);
+    console.log("req.body:", req.body);
+    console.log(
+      "files:",
+      (req.files || []).map((f) => ({
+        fieldname: f.fieldname,
+        originalname: f.originalname,
+        size: f.size,
+      }))
+    );
+
+    const { date, workType, address, uploader, memo } = extractFields(req.body);
+
+    const missing = [];
+    if (!date) missing.push("date");
+    if (!workType) missing.push("workType");
+    if (!address) missing.push("address");
+    if (!uploader) missing.push("uploader");
+
+    if (missing.length > 0) {
+      console.log("❌ Missing fields:", missing);
       return res.status(400).json({
         success: false,
         message: "upload failed",
-        error: "No file received (check <input type='file' ...>)",
+        error: `Missing fields: ${missing.join("/")}`,
       });
     }
 
-    const file = files[0]; // 지금은 1장 기준
-    const { date, workType, address, uploader } = req.body;
-
-    if (!date || !workType || !address || !uploader) {
-      // 업로드 된 파일은 지우고 종료
-      try { fs.unlinkSync(file.path); } catch {}
+    if (!req.files || req.files.length === 0) {
+      console.log("❌ No files uploaded");
       return res.status(400).json({
         success: false,
         message: "upload failed",
-        error: "Missing fields: date/workType/address/uploader",
+        error: "No files uploaded",
       });
     }
 
-    // 1) 날짜 폴더(YYYY-MM-DD) → 공종 폴더 생성
-    const dateFolderId = await getOrCreateFolder(date);
-    const typeFolderId = await getOrCreateFolder(workType, dateFolderId);
+    const drive = getDriveClient();
 
-    // 2) 파일 업로드
-    const ext = path.extname(file.originalname || "") || ".jpg";
-    const safeUploader = String(uploader).replace(/[\\/:*?"<>|]/g, "_");
-    const safeWorkType = String(workType).replace(/[\\/:*?"<>|]/g, "_");
-    const filename = `${date}_${safeWorkType}_${safeUploader}_${Date.now()}${ext}`;
+    const rootFolderId = await findOrCreateFolder(drive, "공사사진", null);
+    const dateFolderId = await findOrCreateFolder(drive, date, rootFolderId);
+    const typeFolderId = await findOrCreateFolder(drive, workType, dateFolderId);
 
-    const uploadRes = await drive.files.create({
-      requestBody: {
-        name: filename,
-        parents: [typeFolderId],
-      },
-      media: {
-        mimeType: file.mimetype,
-        body: fs.createReadStream(file.path),
-      },
-      fields: "id, webViewLink",
-      supportsAllDrives: true,
-    });
+    const links = [];
+    for (const f of req.files) {
+      const safeOriginal = f.originalname.replace(/[\\/:*?"<>|]/g, "_");
+      const filename = `${uploader}_${safeOriginal}`;
+      const uploaded = await uploadFileToDrive(drive, f.path, filename, typeFolderId);
+      links.push(uploaded.webViewLink || "");
+      try { fs.unlinkSync(f.path); } catch (e) {}
+    }
 
-    // 3) 임시파일 삭제
-    try { fs.unlinkSync(file.path); } catch {}
+    if (SPREADSHEET_ID) {
+      const sheets = getSheetsClient();
+      const now = new Date().toISOString();
+      const linksCell = links.filter(Boolean).join("\n");
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A1`,
+        valueInputOption: "USER_ENTERED",
+        requestBody: {
+          values: [[date, workType, address, uploader, memo, linksCell, now]],
+        },
+      });
+    } else {
+      console.log("⚠️ SPREADSHEET_ID not set → skip sheet append");
+    }
 
-    return res.json({
-      success: true,
-      message: "uploaded",
-      fileId: uploadRes.data.id,
-      link: uploadRes.data.webViewLink,
-      savedToDriveRoot: SHARED_DRIVE_ID,
-    });
+    return res.json({ success: true, message: "uploaded", links });
   } catch (err) {
-    console.error("UPLOAD ERROR:", err);
-
+    console.error("🔥 upload error:", err);
     return res.status(500).json({
       success: false,
       message: "upload failed",
-      error: err?.message || String(err),
+      error: err.message || String(err),
     });
   }
 });
 
-// ---------- 서버 시작 ----------
-app.listen(PORT, () => {
-  console.log("Server listening on", PORT);
+// ✅ 2) JSON 업로드 (파일 없이) — 프론트가 JSON으로 보내는지 확인용
+app.post("/upload-json", async (req, res) => {
+  console.log("=== /upload-json hit ===");
+  console.log("content-type:", req.headers["content-type"]);
+  console.log("req.body:", req.body);
+
+  const { date, workType, address, uploader } = extractFields(req.body || {});
+  const missing = [];
+  if (!date) missing.push("date");
+  if (!workType) missing.push("workType");
+  if (!address) missing.push("address");
+  if (!uploader) missing.push("uploader");
+
+  if (missing.length > 0) {
+    return res.status(400).json({
+      success: false,
+      message: "json upload failed",
+      error: `Missing fields: ${missing.join("/")}`,
+    });
+  }
+  return res.json({ success: true, message: "json received" });
 });
+
+app.use(express.static("public"));
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log("Server listening on", PORT));
