@@ -8,6 +8,7 @@ const { google } = require('googleapis');
 
 const app = express();
 app.use(cors());
+app.use(express.static(__dirname));
 app.use(express.json());
 app.use('/files', express.static(path.join(__dirname, 'uploads')));
 // 🔹 index.html을 루트(/)에서 보여주기
